@@ -318,6 +318,9 @@ export class AgentRunner {
   }
 
   private showStatus(): void {
+    // Inside Orca each agent's tab shows its activity, and pi-foreground-first
+    // counts running agents in its one background status line.
+    if (this.settings.orca) return;
     const running = this.locals().map(({ record, run }) => ({ id: record.agent.id, at: run.child.activity?.at ?? record.agent.startedAt, activity: run.child.activity }));
     this.ui?.setStatus(STATUS_KEY, statusText(running));
   }
