@@ -17,6 +17,19 @@ export const PSTACK_STATE_DIR = "pstack";
 // own frontmatter.
 export const USER_AGENTS_DIR = "pstack-agents";
 
+// Where agents open: the Orca CLI and the workspace whose tabs they join.
+export interface OrcaTarget {
+  cli: string;
+  worktree: string;
+}
+
+// Orca exports these to every terminal it runs, so a pi inside Orca, at any
+// depth, opens its agents as Orca tabs.
+export function orcaTarget(env: NodeJS.ProcessEnv): OrcaTarget | undefined {
+  if (!env.ORCA_WORKTREE_ID || env.PSTACK_HIDDEN_AGENTS === "1") return undefined;
+  return { cli: env.ORCA_CLI_COMMAND?.trim() || "orca", worktree: `id:${env.ORCA_WORKTREE_ID}` };
+}
+
 export interface Settings {
   pluginRoot: string;
   modelsFile: string;
@@ -28,6 +41,8 @@ export interface Settings {
   // How long a settled child gets to exit after its stdin closes. It covers a
   // nested child's own shutdown, which stops its agents with killGraceMs each.
   exitGraceMs: number;
+  // Set inside Orca: agents open as visible pi tabs there instead of hidden RPC children.
+  orca?: OrcaTarget;
 }
 
 // Pi re-runs itself for children when it can: the same runtime and CLI script,
@@ -55,6 +70,7 @@ export function defaultSettings(readDepth: () => number, env: NodeJS.ProcessEnv 
     },
     killGraceMs: 5000,
     exitGraceMs: 30_000,
+    orca: orcaTarget(env),
   };
 }
 

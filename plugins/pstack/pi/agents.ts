@@ -8,8 +8,9 @@ import { Value } from "typebox/value";
 
 import { noticeOf, OUTPUT_CAP_BYTES, statusText, truncateUtf8 } from "./agent-text.ts";
 import type { AgentParams } from "./agent-tools.ts";
-import { type Activity, alive, type ChildExit, PiChild, terminateGroup } from "./child.ts";
+import { type Activity, alive, type Child, type ChildExit, PiChild, terminateGroup } from "./child.ts";
 import { checkEffort, DEPTH_FLAG, GENERAL_PURPOSE, loadAgentTypes, PSTACK_STATE_DIR, readSheet, resolveModel, type Settings } from "./config.ts";
+import { OrcaChild } from "./orca-child.ts";
 import { ensureWorktree, planWorktree, settleWorktree, type Worktree, worktreeSchema } from "./worktree.ts";
 
 const ENTRY_TYPE = "pstack-agents";
@@ -72,7 +73,7 @@ export type EndedRecord = Static<typeof endedSchema>;
 export type AgentRecord = Static<typeof recordSchema>;
 
 interface Run {
-  child: PiChild;
+  child: Child;
   background: boolean;
   // Set once the run is told to end: the exit code no longer decides the
   // status. teardown means the session is going away, so no notice follows.
@@ -133,8 +134,14 @@ function settle(worktree: Worktree): { kept: boolean; note: string } {
   }
 }
 
-function childArgs(identity: AgentIdentity, depth: number): string[] {
-  const args = ["--mode", "rpc", "--session-id", identity.sessionId, "--session-dir", identity.sessionDir];
+// Names a visible agent's Orca tab and its pi session.
+const tabTitle = (identity: AgentIdentity) => `agent · ${identity.description}`;
+
+function childArgs(identity: AgentIdentity, depth: number, visible: boolean): string[] {
+  // A visible child keeps its scrollback in the tab after pi exits, and its
+  // session name titles that tab.
+  const mode = visible ? ["--tui-mode", "regular", "--name", tabTitle(identity)] : ["--mode", "rpc"];
+  const args = [...mode, "--session-id", identity.sessionId, "--session-dir", identity.sessionDir];
   if (identity.model) args.push("--model", identity.model);
   if (identity.thinking) args.push("--thinking", identity.thinking);
   if (identity.systemPromptFile) args.push("--append-system-prompt", identity.systemPromptFile);
@@ -269,14 +276,33 @@ export class AgentRunner {
       throw e;
     }
     const { command, args } = this.settings.pi;
-    const child = new PiChild(
-      command,
-      [...args, "--extension", join(this.settings.pluginRoot, "pi", "index.ts"), "--skill", join(this.settings.pluginRoot, "skills"), ...childArgs(identity, this.settings.depth)],
-      { cwd: identity.cwd, env: { [PARENT_SESSION_ENV]: this.ownSessionId }, exitGraceMs: this.settings.exitGraceMs, onActivity: () => this.showStatus() },
-      prompt,
-    );
+    const orca = this.settings.orca;
+    const childArgv = [
+      ...args,
+      "--extension", join(this.settings.pluginRoot, "pi", "index.ts"),
+      ...(orca ? ["--extension", join(this.settings.pluginRoot, "pi", "bridge.ts")] : []),
+      "--skill", join(this.settings.pluginRoot, "skills"),
+      ...childArgs(identity, this.settings.depth, orca !== undefined),
+    ];
+    const opts = { cwd: identity.cwd, env: { [PARENT_SESSION_ENV]: this.ownSessionId }, exitGraceMs: this.settings.exitGraceMs, onActivity: () => this.showStatus() };
+    let record: RunningRecord;
+    const child: Child = orca
+      ? new OrcaChild(command, childArgv, {
+          ...opts,
+          orca,
+          dir: join(identity.sessionDir, `${identity.id}.${Date.now()}.bridge`),
+          title: tabTitle(identity),
+          // Pi starts in the tab after the launch returns; its pid joins the record then.
+          onStarted: (pid) => {
+            if (this.agents.get(identity.id)?.record !== record) return;
+            record = { ...record, pid, pidStart: inspect(pid)?.start };
+            this.agents.set(identity.id, { kind: "local", record, run });
+            this.persist(record);
+          },
+        }, prompt)
+      : new PiChild(command, childArgv, opts, prompt);
     const pidStart = child.pid === undefined ? undefined : inspect(child.pid)?.start;
-    const record: RunningRecord = { agent: identity, status: "running", pid: child.pid, pidStart, parentPid: process.pid };
+    record = { agent: identity, status: "running", pid: child.pid, pidStart, parentPid: process.pid };
     const run: Run = { child, background, done: child.exited.then((exit) => this.finish(identity, run, exit)) };
     this.agents.set(identity.id, { kind: "local", record, run });
     this.persist(record);
